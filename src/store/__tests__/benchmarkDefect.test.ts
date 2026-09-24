@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useTimelineStore } from '../timelineStore';
 
-describe('Benchmark Defect Verification', () => {
+describe('Timeline History & Group Synchronization Verification', () => {
   beforeEach(() => {
     useTimelineStore.getState().resetProject();
   });
 
-  it('Primary Failure: Group move at 150% zoom causes follower clip to jump/desync on Undo', () => {
+  it('Group move at 150% zoom preserves relative offset on Undo and Redo', () => {
     const store = useTimelineStore.getState();
 
     // 1. Reset to starter sequence (at 100% zoom)
@@ -31,7 +31,6 @@ describe('Benchmark Defect Verification', () => {
     let movedIntro = clipsAfterDrag.find((c) => c.id === intro.id)!;
     let movedInterview = clipsAfterDrag.find((c) => c.id === interview.id)!;
 
-    // Initially after drag, both look correct: Intro at 2.0s, Interview at 6.0s
     expect(movedIntro.start).toBe(2);
     expect(movedInterview.start).toBe(6);
     expect(movedInterview.start - movedIntro.start).toBe(4);
@@ -43,16 +42,12 @@ describe('Benchmark Defect Verification', () => {
     let undoneIntro = clipsAfterUndo.find((c) => c.id === intro.id)!;
     let undoneInterview = clipsAfterUndo.find((c) => c.id === interview.id)!;
 
-    // Intro correctly returned to 0s
+    // Both clips restore to their exact pre-drag coordinates
     expect(undoneIntro.start).toBe(0);
+    expect(undoneInterview.start).toBe(4);
+    expect(undoneInterview.start - undoneIntro.start).toBe(4);
 
-    // BUG MANIFESTS: Interview jumped to 3.0s instead of 4.0s!
-    // The 4-second relative offset is broken!
-    expect(undoneInterview.start).not.toBe(4);
-    expect(undoneInterview.start).toBe(3);
-    expect(undoneInterview.start - undoneIntro.start).toBe(3);
-
-    // Redo restores to post-drag
+    // Redo restores to post-drag coordinates
     useTimelineStore.getState().redo();
     let clipsAfterRedo = useTimelineStore.getState().clips;
     let redoneIntro = clipsAfterRedo.find((c) => c.id === intro.id)!;
@@ -60,9 +55,10 @@ describe('Benchmark Defect Verification', () => {
 
     expect(redoneIntro.start).toBe(2);
     expect(redoneInterview.start).toBe(6);
+    expect(redoneInterview.start - redoneIntro.start).toBe(4);
   });
 
-  it('Secondary Check: Cross-track group with hidden track causes offset mismatch on Undo', () => {
+  it('Cross-track group with hidden track restores offset accurately on Undo', () => {
     const store = useTimelineStore.getState();
 
     // 1. Reset to starter sequence
@@ -94,8 +90,8 @@ describe('Benchmark Defect Verification', () => {
     const restoredOverlay = useTimelineStore.getState().clips.find((c) => c.id === overlay.id)!;
 
     expect(restoredIntro.start).toBe(0);
-    // Defect manifested: Overlay returned at displaced position
-    expect(restoredOverlay.start).not.toBe(6);
+    expect(restoredOverlay.start).toBe(6);
+    expect(restoredOverlay.start - restoredIntro.start).toBe(6);
   });
 
   it('Known-Good Control: Single ungrouped clip drag, resize, undo, and redo maintain 100% fidelity', () => {

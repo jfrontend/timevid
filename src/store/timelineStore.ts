@@ -623,15 +623,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           }
 
           if (clipDeltas[c.id] !== undefined) {
-            let delta = clipDeltas[c.id];
-            if (isGroupMove) {
-              // Inverse projection under captured transaction viewport
-              // When replaying group movement, follower displacement is projected
-              // through the transaction's reference scale:
-              const anchorDelta = clipDeltas[primaryClipId] ?? 0;
-              const screenDelta = anchorDelta * BASE_PIXELS_PER_SECOND * capturedZoom;
-              delta = screenDelta / BASE_PIXELS_PER_SECOND;
-            }
+            const delta = clipDeltas[c.id];
             return {
               ...c,
               start: Math.max(0, Number((c.start - delta).toFixed(3))),
@@ -766,12 +758,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           }
 
           if (clipDeltas[c.id] !== undefined) {
-            let delta = clipDeltas[c.id];
-            if (isGroupMove) {
-              const anchorDelta = clipDeltas[primaryClipId] ?? 0;
-              const screenDelta = anchorDelta * BASE_PIXELS_PER_SECOND * capturedZoom;
-              delta = screenDelta / BASE_PIXELS_PER_SECOND;
-            }
+            const delta = clipDeltas[c.id];
             return {
               ...c,
               start: Math.max(0, Number((c.start + delta).toFixed(3))),
