@@ -91,7 +91,7 @@ export function calculateGroupMovement(
     }
   }
 
-  // Enforce global boundary: no clip can start before 0
+  // Keep every clip at or after the origin
   let minStartAcrossAll = Infinity;
   Object.values(initialClips).forEach((c) => {
     if (c.start + effectiveDelta < minStartAcrossAll) {
@@ -99,16 +99,11 @@ export function calculateGroupMovement(
     }
   });
 
-  let adjustedDelta = effectiveDelta;
-  if (minStartAcrossAll < 0) {
-    adjustedDelta -= minStartAcrossAll;
-  }
-
   const clipUpdates: Record<string, { start: number; trackId: string }> = {};
   Object.keys(initialClips).forEach((id) => {
     const init = initialClips[id];
     clipUpdates[id] = {
-      start: Math.max(0, Number((init.start + adjustedDelta).toFixed(3))),
+      start: Math.max(0, Number((init.start + effectiveDelta).toFixed(3))),
       trackId: id === primaryClipId ? targetTrackId : init.trackId,
     };
   });
