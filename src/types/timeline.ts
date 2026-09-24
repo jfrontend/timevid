@@ -26,11 +26,54 @@ export interface SnapTarget {
   type: 'playhead' | 'clip-start' | 'clip-end' | 'ruler' | 'origin';
 }
 
-export interface HistorySnapshot {
-  tracks: Track[];
-  clips: Clip[];
-  selectedClipIds: string[];
-}
+export type TimelineTransaction =
+  | {
+      type: 'MOVE_CLIPS';
+      primaryClipId: string;
+      clipDeltas: Record<string, number>;
+      initialTrackId: string;
+      targetTrackId: string;
+      capturedZoom: number;
+      isGroupMove: boolean;
+    }
+  | {
+      type: 'RESIZE_CLIP';
+      clipId: string;
+      edge: 'left' | 'right';
+      deltaStart: number;
+      deltaDuration: number;
+      rippleDeltas?: Record<string, number>;
+    }
+  | {
+      type: 'GROUP_CLIPS';
+      groupId: string;
+      clipIds: string[];
+    }
+  | {
+      type: 'UNGROUP_CLIPS';
+      groupId: string;
+      clipIds: string[];
+    }
+  | {
+      type: 'TRACK_VISIBILITY';
+      trackId: string;
+      hidden: boolean;
+    }
+  | {
+      type: 'TRACK_LOCK';
+      trackId: string;
+      locked: boolean;
+    }
+  | {
+      type: 'DELETE_CLIPS';
+      deletedClips: Clip[];
+    }
+  | {
+      type: 'UPDATE_CLIP';
+      clipId: string;
+      before: Partial<Clip>;
+      after: Partial<Clip>;
+    };
 
 export type DragMode = 'move' | 'resize-left' | 'resize-right';
 
