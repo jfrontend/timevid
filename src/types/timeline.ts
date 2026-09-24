@@ -20,11 +20,6 @@ export interface Clip {
   color: string;
 }
 
-export interface GroupState {
-  anchorId: string;
-  memberOffsets: Record<string, number>; // relative offset in rendered timeline space
-}
-
 export interface SnapTarget {
   time: number;
   label: string;
@@ -35,7 +30,6 @@ export interface HistorySnapshot {
   tracks: Track[];
   clips: Clip[];
   selectedClipIds: string[];
-  groupStates: Record<string, GroupState>;
 }
 
 export type DragMode = 'move' | 'resize-left' | 'resize-right';
