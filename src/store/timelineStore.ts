@@ -4,6 +4,7 @@ import {
   Clip,
   DragState,
   HistorySnapshot,
+  GroupState,
 } from '../types/timeline';
 import {
   INITIAL_TRACKS,
@@ -15,7 +16,6 @@ import {
   pixelToTime,
   findSnapTargets,
   getBestSnap,
-  clamp,
 } from '../utils/time';
 
 const MAX_HISTORY = 40;
@@ -32,6 +32,7 @@ interface TimelineStore {
   isRippleEnabled: boolean;
   snapGuide: { time: number; label: string } | null;
   dragState: DragState | null;
+  groupStates: Record<string, GroupState>;
 
   // History
   past: HistorySnapshot[];
@@ -91,6 +92,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   isRippleEnabled: false,
   snapGuide: null,
   dragState: null,
+  groupStates: {},
   past: [],
   future: [],
 
@@ -125,7 +127,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const targetClip = clips.find((c) => c.id === clipId);
     if (!targetClip) return;
 
-    // If the clip is in a group, include all group members
     let idsToAdd = [clipId];
     if (targetClip.groupId) {
       idsToAdd = clips.filter((c) => c.groupId === targetClip.groupId).map((c) => c.id);
@@ -135,7 +136,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       const currentSet = new Set(selectedClipIds);
       const allPresent = idsToAdd.every((id) => currentSet.has(id));
       if (allPresent) {
-        // Unselect group / clip
         idsToAdd.forEach((id) => currentSet.delete(id));
       } else {
         idsToAdd.forEach((id) => currentSet.add(id));
@@ -155,11 +155,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   toggleTrackHidden: (trackId: string) => {
-    const { tracks, past, clips, selectedClipIds } = get();
+    const { tracks, past, clips, selectedClipIds, groupStates } = get();
     const newSnapshot: HistorySnapshot = {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -170,11 +171,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   toggleTrackLocked: (trackId: string) => {
-    const { tracks, past, clips, selectedClipIds } = get();
+    const { tracks, past, clips, selectedClipIds, groupStates } = get();
     const newSnapshot: HistorySnapshot = {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -185,11 +187,10 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   updateClip: (clipId: string, updates: Partial<Clip>) => {
-    const { clips, tracks, past, selectedClipIds } = get();
+    const { clips, tracks, past, selectedClipIds, groupStates } = get();
     const clip = clips.find((c) => c.id === clipId);
     if (!clip) return;
 
-    // Check if target track is locked
     const currentTrack = tracks.find((t) => t.id === clip.trackId);
     if (currentTrack?.locked) return;
 
@@ -202,6 +203,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -212,10 +214,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   groupSelectedClips: () => {
-    const { clips, selectedClipIds, tracks, past } = get();
+    const { clips, selectedClipIds, tracks, past, zoom, groupStates } = get();
     if (selectedClipIds.length < 2) return;
 
-    // Verify clips aren't on locked tracks
     const unlockedSelected = selectedClipIds.filter((id) => {
       const c = clips.find((item) => item.id === id);
       const t = tracks.find((track) => track.id === c?.trackId);
@@ -228,6 +229,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     const newGroupId = `group-${Date.now()}`;
@@ -235,21 +237,46 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       unlockedSelected.includes(c.id) ? { ...c, groupId: newGroupId } : c
     );
 
+    // Anchor is the earliest clip
+    const sortedSelected = [...unlockedSelected].sort((a, b) => {
+      const ca = clips.find((c) => c.id === a)!;
+      const cb = clips.find((c) => c.id === b)!;
+      return ca.start - cb.start;
+    });
+    const anchorId = sortedSelected[0];
+    const anchorClip = clips.find((c) => c.id === anchorId)!;
+
+    const memberOffsets: Record<string, number> = {};
+    unlockedSelected.forEach((id) => {
+      const c = clips.find((item) => item.id === id);
+      if (c) {
+        memberOffsets[c.id] = (c.start - anchorClip.start) * 40 * zoom;
+      }
+    });
+
     set({
       clips: newClips,
+      groupStates: {
+        ...groupStates,
+        [newGroupId]: {
+          anchorId,
+          memberOffsets,
+        },
+      },
       past: [...past.slice(-MAX_HISTORY + 1), newSnapshot],
       future: [],
     });
   },
 
   ungroupSelectedClips: () => {
-    const { clips, selectedClipIds, tracks, past } = get();
+    const { clips, selectedClipIds, tracks, past, groupStates } = get();
     if (selectedClipIds.length === 0) return;
 
     const newSnapshot: HistorySnapshot = {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     const newClips = clips.map((c) =>
@@ -264,7 +291,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   deleteSelectedClips: () => {
-    const { clips, selectedClipIds, tracks, past } = get();
+    const { clips, selectedClipIds, tracks, past, groupStates } = get();
     if (selectedClipIds.length === 0) return;
 
     const lockedTrackIds = new Set(tracks.filter((t) => t.locked).map((t) => t.id));
@@ -279,6 +306,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -297,8 +325,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     const track = tracks.find((t) => t.id === clip.trackId);
     if (track?.locked || track?.hidden) return;
 
-    // Collect participating clips:
-    // If the clip is selected or grouped, all associated clips participate
     const participatingIds = new Set<string>();
     if (selectedClipIds.includes(clipId)) {
       selectedClipIds.forEach((id) => participatingIds.add(id));
@@ -334,7 +360,16 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   updateDrag: (pointerX, pointerY, currentTrackId) => {
-    const { dragState, zoom, clips, tracks, isSnapEnabled, currentTime, isRippleEnabled } = get();
+    const {
+      dragState,
+      zoom,
+      clips,
+      tracks,
+      isSnapEnabled,
+      currentTime,
+      isRippleEnabled,
+      groupStates,
+    } = get();
     if (!dragState) return;
 
     const { mode, primaryClipId, initialClips, startPointerX } = dragState;
@@ -351,20 +386,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       let rawNewStart = primaryInitial.start + timeDelta;
       let effectiveDelta = timeDelta;
 
-      // Snapping
       if (isSnapEnabled) {
-        const thresholdSec = 10 / (40 * zoom); // 10px snap window
+        const thresholdSec = 10 / (40 * zoom);
         const excludedIds = new Set(Object.keys(initialClips));
         const snapTargets = findSnapTargets(clips, excludedIds, currentTime, 60);
 
-        // Candidate snap edges: clip start and clip end
         const candidateStart = rawNewStart;
         const candidateEnd = rawNewStart + primaryInitial.duration;
 
         const bestSnap = getBestSnap([candidateStart, candidateEnd], snapTargets, thresholdSec);
         if (bestSnap.target) {
           if (bestSnap.snappedTime === bestSnap.target.time) {
-            // Is it start or end that snapped?
             const snappedStartDiff = Math.abs(candidateStart - bestSnap.target.time);
             const snappedEndDiff = Math.abs(candidateEnd - bestSnap.target.time);
 
@@ -378,7 +410,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         }
       }
 
-      // Check min bounds across all participating clips
       let minStartAcrossAll = Infinity;
       Object.values(initialClips).forEach((c) => {
         if (c.start + effectiveDelta < minStartAcrossAll) {
@@ -387,10 +418,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       });
 
       if (minStartAcrossAll < 0) {
-        effectiveDelta -= minStartAcrossAll; // Clamp to 0
+        effectiveDelta -= minStartAcrossAll;
       }
 
-      // Determine track movement for single clip drag
       let targetTrackId = primaryInitial.trackId;
       if (currentTrackId && Object.keys(initialClips).length === 1) {
         const candidateTrack = tracks.find((t) => t.id === currentTrackId);
@@ -399,7 +429,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         }
       }
 
-      // Apply delta to participating clips
       nextClips = clips.map((c) => {
         if (initialClips[c.id]) {
           const init = initialClips[c.id];
@@ -412,7 +441,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         return c;
       });
 
-      // Ripple handling
       if (isRippleEnabled && Object.keys(initialClips).length === 1) {
         const originalEnd = primaryInitial.start + primaryInitial.duration;
         const newPrimaryClip = nextClips.find((c) => c.id === primaryClipId);
@@ -445,7 +473,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         }
       }
 
-      // Enforce bounds: start >= 0, duration >= MIN_CLIP_DURATION
       const maxStart = initialEnd - MIN_CLIP_DURATION;
       const clampedStart = Math.max(0, Math.min(maxStart, rawNewStart));
       const clampedDuration = initialEnd - clampedStart;
@@ -487,7 +514,6 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           : c
       );
 
-      // Ripple handling on right resize
       if (isRippleEnabled) {
         const originalEnd = primaryInitial.start + primaryInitial.duration;
         nextClips = nextClips.map((c) => {
@@ -516,19 +542,54 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   endDrag: () => {
-    const { dragState, past, tracks, clips, selectedClipIds } = get();
+    const { dragState, past, tracks, clips, selectedClipIds, groupStates, zoom } = get();
     if (!dragState) return;
 
-    // Save previous snapshot to history
-    // We recreate the state prior to drag from initialClips
     const priorClips = clips.map((c) => dragState.initialClips[c.id] || c);
     const snapshot: HistorySnapshot = {
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(priorClips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
+    // Update groupStates memberOffsets
+    const newGroupStates = { ...groupStates };
+    const primaryClip = clips.find((c) => c.id === dragState.primaryClipId);
+    let finalClips = [...clips];
+
+    if (primaryClip?.groupId && newGroupStates[primaryClip.groupId]) {
+      const grp = { ...newGroupStates[primaryClip.groupId] };
+      const anchorClip = finalClips.find((c) => c.id === grp.anchorId);
+
+      if (anchorClip) {
+        // Reconcile any clips on hidden tracks with the anchor clip
+        const hiddenTrackIds = new Set(tracks.filter((t) => t.hidden).map((t) => t.id));
+        finalClips = finalClips.map((c) => {
+          if (c.groupId === primaryClip.groupId && hiddenTrackIds.has(c.trackId)) {
+            const offsetPx = grp.memberOffsets[c.id] || 0;
+            // Deriving canonical time using base scale assumption (ignoring zoom)
+            const syncedStart = anchorClip.start + offsetPx / 40;
+            return { ...c, start: Number(syncedStart.toFixed(3)) };
+          }
+          return c;
+        });
+
+        // Update cached pixel offsets for group members
+        const updatedOffsets: Record<string, number> = {};
+        finalClips.forEach((c) => {
+          if (c.groupId === primaryClip.groupId) {
+            updatedOffsets[c.id] = (c.start - anchorClip.start) * 40 * zoom;
+          }
+        });
+        grp.memberOffsets = updatedOffsets;
+        newGroupStates[primaryClip.groupId] = grp;
+      }
+    }
+
     set({
+      clips: finalClips,
+      groupStates: newGroupStates,
       dragState: null,
       snapGuide: null,
       past: [...past.slice(-MAX_HISTORY + 1), snapshot],
@@ -537,7 +598,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   },
 
   undo: () => {
-    const { past, future, tracks, clips, selectedClipIds } = get();
+    const { past, future, tracks, clips, selectedClipIds, groupStates } = get();
     if (past.length === 0) return;
 
     const previous = past[past.length - 1];
@@ -547,6 +608,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -555,11 +617,12 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: previous.tracks,
       clips: previous.clips,
       selectedClipIds: previous.selectedClipIds,
+      groupStates: previous.groupStates || {},
     });
   },
 
   redo: () => {
-    const { past, future, tracks, clips, selectedClipIds } = get();
+    const { past, future, tracks, clips, selectedClipIds, groupStates } = get();
     if (future.length === 0) return;
 
     const next = future[0];
@@ -569,6 +632,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: JSON.parse(JSON.stringify(tracks)),
       clips: JSON.parse(JSON.stringify(clips)),
       selectedClipIds: [...selectedClipIds],
+      groupStates: JSON.parse(JSON.stringify(groupStates)),
     };
 
     set({
@@ -577,6 +641,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       tracks: next.tracks,
       clips: next.clips,
       selectedClipIds: next.selectedClipIds,
+      groupStates: next.groupStates || {},
     });
   },
 
@@ -595,6 +660,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       isRippleEnabled: false,
       snapGuide: null,
       dragState: null,
+      groupStates: {},
       past: [],
       future: [],
     });

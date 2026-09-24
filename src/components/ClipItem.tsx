@@ -16,13 +16,28 @@ export const ClipItem: React.FC<ClipItemProps> = ({ clip, track }) => {
     selectClip,
     startDrag,
     dragState,
+    groupStates,
+    clips,
   } = useTimelineStore();
 
   const isSelected = selectedClipIds.includes(clip.id);
-  const isDraggingThis = dragState?.primaryClipId === clip.id;
   const isLocked = track.locked;
 
-  const leftPx = timeToPixel(clip.start, zoom);
+  // Derive rendered left position
+  let leftPx = timeToPixel(clip.start, zoom);
+  if (
+    clip.groupId &&
+    groupStates[clip.groupId] &&
+    groupStates[clip.groupId].anchorId !== clip.id
+  ) {
+    const grp = groupStates[clip.groupId];
+    const anchorClip = clips.find((c) => c.id === grp.anchorId);
+    const offsetPx = grp.memberOffsets[clip.id];
+    if (anchorClip && offsetPx !== undefined) {
+      leftPx = timeToPixel(anchorClip.start, zoom) + offsetPx;
+    }
+  }
+
   const widthPx = Math.max(16, timeToPixel(clip.duration, zoom));
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -65,7 +80,6 @@ export const ClipItem: React.FC<ClipItemProps> = ({ clip, track }) => {
           ? 'ring-2 ring-white shadow-lg shadow-sky-500/20 z-10'
           : 'ring-1 ring-white/10 hover:ring-white/30 z-0'
       }`}
-      style-extra=""
     >
       {/* Clip Background with subtle gradient */}
       <div
