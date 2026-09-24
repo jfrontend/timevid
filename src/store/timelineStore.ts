@@ -10,13 +10,30 @@ import {
   INITIAL_CLIPS,
   MIN_CLIP_DURATION,
   DEFAULT_TOTAL_DURATION,
-  BASE_PIXELS_PER_SECOND,
 } from '../constants/initialData';
 import {
   pixelToTime,
+  getSnapThresholdInTime,
+} from '../engine/coordinates';
+import {
   findSnapTargets,
-  getBestSnap,
-} from '../utils/time';
+  evaluateSnapCandidates,
+  SnapCandidateEdge,
+} from '../engine/snapping';
+import {
+  resolveGroupSelection,
+  createGroup,
+  ungroupSelected,
+  calculateGroupMovement,
+} from '../engine/groups';
+import {
+  calculateRippleDragShift,
+  calculateRippleTrimShift,
+} from '../engine/ripple';
+import {
+  applyTransaction,
+  applyInverseTransaction,
+} from '../engine/history';
 
 const MAX_HISTORY = 40;
 
@@ -122,26 +139,8 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   selectClip: (clipId: string, multiSelect = false) => {
     const { clips, selectedClipIds } = get();
-    const targetClip = clips.find((c) => c.id === clipId);
-    if (!targetClip) return;
-
-    let idsToAdd = [clipId];
-    if (targetClip.groupId) {
-      idsToAdd = clips.filter((c) => c.groupId === targetClip.groupId).map((c) => c.id);
-    }
-
-    if (multiSelect) {
-      const currentSet = new Set(selectedClipIds);
-      const allPresent = idsToAdd.every((id) => currentSet.has(id));
-      if (allPresent) {
-        idsToAdd.forEach((id) => currentSet.delete(id));
-      } else {
-        idsToAdd.forEach((id) => currentSet.add(id));
-      }
-      set({ selectedClipIds: Array.from(currentSet) });
-    } else {
-      set({ selectedClipIds: idsToAdd });
-    }
+    const newSelection = resolveGroupSelection(clips, clipId, multiSelect, selectedClipIds);
+    set({ selectedClipIds: newSelection });
   },
 
   clearSelection: () => {
@@ -222,29 +221,17 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   groupSelectedClips: () => {
     const { clips, selectedClipIds, tracks, past } = get();
-    if (selectedClipIds.length < 2) return;
-
-    const unlockedSelected = selectedClipIds.filter((id) => {
-      const c = clips.find((item) => item.id === id);
-      const t = tracks.find((track) => track.id === c?.trackId);
-      return !t?.locked;
-    });
-
-    if (unlockedSelected.length < 2) return;
-
-    const newGroupId = `group-${Date.now()}`;
-    const newClips = clips.map((c) =>
-      unlockedSelected.includes(c.id) ? { ...c, groupId: newGroupId } : c
-    );
+    const result = createGroup(clips, selectedClipIds, tracks);
+    if (!result) return;
 
     const tx: TimelineTransaction = {
       type: 'GROUP_CLIPS',
-      groupId: newGroupId,
-      clipIds: unlockedSelected,
+      groupId: result.groupId,
+      clipIds: selectedClipIds,
     };
 
     set({
-      clips: newClips,
+      clips: result.newClips,
       past: [...past.slice(-MAX_HISTORY + 1), tx],
       future: [],
     });
@@ -252,23 +239,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
   ungroupSelectedClips: () => {
     const { clips, selectedClipIds, past } = get();
-    if (selectedClipIds.length === 0) return;
-
-    const targetClip = clips.find((c) => selectedClipIds.includes(c.id) && c.groupId);
-    if (!targetClip || !targetClip.groupId) return;
-
-    const groupId = targetClip.groupId;
-    const affectedClipIds = clips.filter((c) => c.groupId === groupId).map((c) => c.id);
+    const { newClips, affectedGroupId } = ungroupSelected(clips, selectedClipIds);
+    if (!affectedGroupId) return;
 
     const tx: TimelineTransaction = {
       type: 'UNGROUP_CLIPS',
-      groupId,
-      clipIds: affectedClipIds,
+      groupId: affectedGroupId,
+      clipIds: selectedClipIds,
     };
-
-    const newClips = clips.map((c) =>
-      affectedClipIds.includes(c.id) ? { ...c, groupId: null } : c
-    );
 
     set({
       clips: newClips,
@@ -371,71 +349,71 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       let effectiveDelta = timeDelta;
 
       if (isSnapEnabled) {
-        const thresholdSec = 10 / (BASE_PIXELS_PER_SECOND * zoom);
+        const thresholdSec = getSnapThresholdInTime(zoom, 10);
         const excludedIds = new Set(Object.keys(initialClips));
         const snapTargets = findSnapTargets(clips, excludedIds, currentTime, 60);
 
-        const candidateStart = rawNewStart;
-        const candidateEnd = rawNewStart + primaryInitial.duration;
+        const candidateEdges: SnapCandidateEdge[] = [
+          {
+            clipId: primaryClipId,
+            edge: 'start',
+            candidateTime: rawNewStart,
+            initialTime: primaryInitial.start,
+          },
+          {
+            clipId: primaryClipId,
+            edge: 'end',
+            candidateTime: rawNewStart + primaryInitial.duration,
+            initialTime: primaryInitial.start + primaryInitial.duration,
+          },
+        ];
 
-        const bestSnap = getBestSnap([candidateStart, candidateEnd], snapTargets, thresholdSec);
-        if (bestSnap.target) {
-          if (bestSnap.snappedTime === bestSnap.target.time) {
-            const snappedStartDiff = Math.abs(candidateStart - bestSnap.target.time);
-            const snappedEndDiff = Math.abs(candidateEnd - bestSnap.target.time);
-
-            if (snappedStartDiff <= snappedEndDiff) {
-              effectiveDelta = bestSnap.target.time - primaryInitial.start;
-            } else {
-              effectiveDelta = bestSnap.target.time - (primaryInitial.start + primaryInitial.duration);
-            }
-            activeSnapGuide = { time: bestSnap.target.time, label: bestSnap.target.label };
-          }
+        const snapResult = evaluateSnapCandidates(candidateEdges, snapTargets, thresholdSec);
+        if (snapResult.hasSnapped) {
+          effectiveDelta = snapResult.snappedDelta;
+          activeSnapGuide = snapResult.guide;
         }
       }
 
-      let minStartAcrossAll = Infinity;
-      Object.values(initialClips).forEach((c) => {
-        if (c.start + effectiveDelta < minStartAcrossAll) {
-          minStartAcrossAll = c.start + effectiveDelta;
-        }
-      });
-
-      if (minStartAcrossAll < 0) {
-        effectiveDelta -= minStartAcrossAll;
-      }
-
-      let targetTrackId = primaryInitial.trackId;
-      if (currentTrackId && Object.keys(initialClips).length === 1) {
-        const candidateTrack = tracks.find((t) => t.id === currentTrackId);
-        if (candidateTrack && !candidateTrack.locked && candidateTrack.type === primaryInitial.type) {
-          targetTrackId = currentTrackId;
-        }
-      }
+      // Calculate coordinated group movement across tracks
+      const { clipUpdates } = calculateGroupMovement(
+        initialClips,
+        primaryClipId,
+        effectiveDelta,
+        currentTrackId,
+        tracks
+      );
 
       nextClips = clips.map((c) => {
-        if (initialClips[c.id]) {
-          const init = initialClips[c.id];
+        if (clipUpdates[c.id]) {
           return {
             ...c,
-            start: Math.max(0, Number((init.start + effectiveDelta).toFixed(3))),
-            trackId: c.id === primaryClipId ? targetTrackId : c.trackId,
+            start: clipUpdates[c.id].start,
+            trackId: clipUpdates[c.id].trackId,
           };
         }
         return c;
       });
 
+      // Ripple handling
       if (isRippleEnabled && Object.keys(initialClips).length === 1) {
         const originalEnd = primaryInitial.start + primaryInitial.duration;
-        const newPrimaryClip = nextClips.find((c) => c.id === primaryClipId);
-        if (newPrimaryClip) {
-          const shiftDelta = newPrimaryClip.start - primaryInitial.start;
+        const newPrimary = nextClips.find((c) => c.id === primaryClipId);
+        if (newPrimary) {
+          const shiftDelta = newPrimary.start - primaryInitial.start;
+          const targetTrack = clipUpdates[primaryClipId]?.trackId || primaryInitial.trackId;
+          const rippleShifts = calculateRippleDragShift(
+            nextClips,
+            primaryClipId,
+            targetTrack,
+            originalEnd,
+            shiftDelta
+          );
           nextClips = nextClips.map((c) => {
-            if (c.id === primaryClipId) return c;
-            if (c.trackId === targetTrackId && c.start >= originalEnd) {
+            if (rippleShifts[c.id] !== undefined) {
               return {
                 ...c,
-                start: Math.max(0, Number((c.start + shiftDelta).toFixed(3))),
+                start: Math.max(0, Number((c.start + rippleShifts[c.id]).toFixed(3))),
               };
             }
             return c;
@@ -447,13 +425,21 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       const initialEnd = primaryInitial.start + primaryInitial.duration;
 
       if (isSnapEnabled) {
-        const thresholdSec = 10 / (BASE_PIXELS_PER_SECOND * zoom);
+        const thresholdSec = getSnapThresholdInTime(zoom, 10);
         const excludedIds = new Set([primaryClipId]);
         const snapTargets = findSnapTargets(clips, excludedIds, currentTime, 60);
-        const bestSnap = getBestSnap([rawNewStart], snapTargets, thresholdSec);
-        if (bestSnap.target) {
-          rawNewStart = bestSnap.target.time;
-          activeSnapGuide = { time: bestSnap.target.time, label: bestSnap.target.label };
+        const candidateEdges: SnapCandidateEdge[] = [
+          {
+            clipId: primaryClipId,
+            edge: 'start',
+            candidateTime: rawNewStart,
+            initialTime: primaryInitial.start,
+          },
+        ];
+        const snapResult = evaluateSnapCandidates(candidateEdges, snapTargets, thresholdSec);
+        if (snapResult.hasSnapped) {
+          rawNewStart = primaryInitial.start + snapResult.snappedDelta;
+          activeSnapGuide = snapResult.guide;
         }
       }
 
@@ -474,13 +460,21 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       let rawNewEnd = primaryInitial.start + primaryInitial.duration + timeDelta;
 
       if (isSnapEnabled) {
-        const thresholdSec = 10 / (BASE_PIXELS_PER_SECOND * zoom);
+        const thresholdSec = getSnapThresholdInTime(zoom, 10);
         const excludedIds = new Set([primaryClipId]);
         const snapTargets = findSnapTargets(clips, excludedIds, currentTime, 60);
-        const bestSnap = getBestSnap([rawNewEnd], snapTargets, thresholdSec);
-        if (bestSnap.target) {
-          rawNewEnd = bestSnap.target.time;
-          activeSnapGuide = { time: bestSnap.target.time, label: bestSnap.target.label };
+        const candidateEdges: SnapCandidateEdge[] = [
+          {
+            clipId: primaryClipId,
+            edge: 'end',
+            candidateTime: rawNewEnd,
+            initialTime: primaryInitial.start + primaryInitial.duration,
+          },
+        ];
+        const snapResult = evaluateSnapCandidates(candidateEdges, snapTargets, thresholdSec);
+        if (snapResult.hasSnapped) {
+          rawNewEnd = primaryInitial.start + primaryInitial.duration + snapResult.snappedDelta;
+          activeSnapGuide = snapResult.guide;
         }
       }
 
@@ -500,12 +494,18 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
       if (isRippleEnabled) {
         const originalEnd = primaryInitial.start + primaryInitial.duration;
+        const rippleShifts = calculateRippleTrimShift(
+          nextClips,
+          primaryClipId,
+          primaryInitial.trackId,
+          originalEnd,
+          durationDelta
+        );
         nextClips = nextClips.map((c) => {
-          if (c.id === primaryClipId) return c;
-          if (c.trackId === primaryInitial.trackId && c.start >= originalEnd - 0.001) {
+          if (rippleShifts[c.id] !== undefined) {
             return {
               ...c,
-              start: Math.max(0, Number((c.start + durationDelta).toFixed(3))),
+              start: Math.max(0, Number((c.start + rippleShifts[c.id]).toFixed(3))),
             };
           }
           return c;
@@ -569,11 +569,15 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
         const rippleDeltas: Record<string, number> = {};
         if (isRippleEnabled && mode === 'resize-right') {
-          clips.forEach((c) => {
-            if (c.id !== primaryClipId && c.trackId === primaryInitial.trackId && c.start >= primaryInitial.start + primaryInitial.duration) {
-              rippleDeltas[c.id] = deltaDuration;
-            }
-          });
+          const originalEnd = primaryInitial.start + primaryInitial.duration;
+          const shifts = calculateRippleTrimShift(
+            clips,
+            primaryClipId,
+            primaryInitial.trackId,
+            originalEnd,
+            deltaDuration
+          );
+          Object.assign(rippleDeltas, shifts);
         }
 
         const tx: TimelineTransaction = {
@@ -607,133 +611,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
     const tx = past[past.length - 1];
     const newPast = past.slice(0, past.length - 1);
+    const { tracks: newTracks, clips: newClips } = applyInverseTransaction(tx, tracks, clips);
 
-    switch (tx.type) {
-      case 'MOVE_CLIPS': {
-        const { primaryClipId, clipDeltas, initialTrackId, capturedZoom, isGroupMove } = tx;
-
-        const updatedClips = clips.map((c) => {
-          if (c.id === primaryClipId) {
-            const delta = clipDeltas[c.id] ?? 0;
-            return {
-              ...c,
-              start: Math.max(0, Number((c.start - delta).toFixed(3))),
-              trackId: initialTrackId,
-            };
-          }
-
-          if (clipDeltas[c.id] !== undefined) {
-            const delta = clipDeltas[c.id];
-            return {
-              ...c,
-              start: Math.max(0, Number((c.start - delta).toFixed(3))),
-            };
-          }
-
-          return c;
-        });
-
-        set({
-          clips: updatedClips,
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'RESIZE_CLIP': {
-        const { clipId, deltaStart, deltaDuration, rippleDeltas } = tx;
-        const updatedClips = clips.map((c) => {
-          if (c.id === clipId) {
-            return {
-              ...c,
-              start: Number((c.start - deltaStart).toFixed(3)),
-              duration: Number((c.duration - deltaDuration).toFixed(3)),
-            };
-          }
-          if (rippleDeltas && rippleDeltas[c.id] !== undefined) {
-            return {
-              ...c,
-              start: Number((c.start - rippleDeltas[c.id]).toFixed(3)),
-            };
-          }
-          return c;
-        });
-
-        set({
-          clips: updatedClips,
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'GROUP_CLIPS': {
-        const { clipIds } = tx;
-        const updatedClips = clips.map((c) =>
-          clipIds.includes(c.id) ? { ...c, groupId: null } : c
-        );
-        set({
-          clips: updatedClips,
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'UNGROUP_CLIPS': {
-        const { groupId, clipIds } = tx;
-        const updatedClips = clips.map((c) =>
-          clipIds.includes(c.id) ? { ...c, groupId } : c
-        );
-        set({
-          clips: updatedClips,
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'TRACK_VISIBILITY': {
-        const { trackId, hidden } = tx;
-        set({
-          tracks: tracks.map((t) => (t.id === trackId ? { ...t, hidden: !hidden } : t)),
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'TRACK_LOCK': {
-        const { trackId, locked } = tx;
-        set({
-          tracks: tracks.map((t) => (t.id === trackId ? { ...t, locked: !locked } : t)),
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'DELETE_CLIPS': {
-        const { deletedClips } = tx;
-        set({
-          clips: [...clips, ...deletedClips],
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-
-      case 'UPDATE_CLIP': {
-        const { clipId, before } = tx;
-        set({
-          clips: clips.map((c) => (c.id === clipId ? { ...c, ...before } : c)),
-          past: newPast,
-          future: [tx, ...future],
-        });
-        break;
-      }
-    }
+    set({
+      tracks: newTracks,
+      clips: newClips,
+      past: newPast,
+      future: [tx, ...future],
+    });
   },
 
   redo: () => {
@@ -742,134 +627,14 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
 
     const tx = future[0];
     const newFuture = future.slice(1);
+    const { tracks: newTracks, clips: newClips } = applyTransaction(tx, tracks, clips);
 
-    switch (tx.type) {
-      case 'MOVE_CLIPS': {
-        const { primaryClipId, clipDeltas, targetTrackId, capturedZoom, isGroupMove } = tx;
-
-        const updatedClips = clips.map((c) => {
-          if (c.id === primaryClipId) {
-            const delta = clipDeltas[c.id] ?? 0;
-            return {
-              ...c,
-              start: Math.max(0, Number((c.start + delta).toFixed(3))),
-              trackId: targetTrackId,
-            };
-          }
-
-          if (clipDeltas[c.id] !== undefined) {
-            const delta = clipDeltas[c.id];
-            return {
-              ...c,
-              start: Math.max(0, Number((c.start + delta).toFixed(3))),
-            };
-          }
-
-          return c;
-        });
-
-        set({
-          clips: updatedClips,
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'RESIZE_CLIP': {
-        const { clipId, deltaStart, deltaDuration, rippleDeltas } = tx;
-        const updatedClips = clips.map((c) => {
-          if (c.id === clipId) {
-            return {
-              ...c,
-              start: Number((c.start + deltaStart).toFixed(3)),
-              duration: Number((c.duration + deltaDuration).toFixed(3)),
-            };
-          }
-          if (rippleDeltas && rippleDeltas[c.id] !== undefined) {
-            return {
-              ...c,
-              start: Number((c.start + rippleDeltas[c.id]).toFixed(3)),
-            };
-          }
-          return c;
-        });
-
-        set({
-          clips: updatedClips,
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'GROUP_CLIPS': {
-        const { groupId, clipIds } = tx;
-        const updatedClips = clips.map((c) =>
-          clipIds.includes(c.id) ? { ...c, groupId } : c
-        );
-        set({
-          clips: updatedClips,
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'UNGROUP_CLIPS': {
-        const { clipIds } = tx;
-        const updatedClips = clips.map((c) =>
-          clipIds.includes(c.id) ? { ...c, groupId: null } : c
-        );
-        set({
-          clips: updatedClips,
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'TRACK_VISIBILITY': {
-        const { trackId, hidden } = tx;
-        set({
-          tracks: tracks.map((t) => (t.id === trackId ? { ...t, hidden } : t)),
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'TRACK_LOCK': {
-        const { trackId, locked } = tx;
-        set({
-          tracks: tracks.map((t) => (t.id === trackId ? { ...t, locked } : t)),
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'DELETE_CLIPS': {
-        const { deletedClips } = tx;
-        const deleteIds = new Set(deletedClips.map((c) => c.id));
-        set({
-          clips: clips.filter((c) => !deleteIds.has(c.id)),
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-
-      case 'UPDATE_CLIP': {
-        const { clipId, after } = tx;
-        set({
-          clips: clips.map((c) => (c.id === clipId ? { ...c, ...after } : c)),
-          past: [...past, tx],
-          future: newFuture,
-        });
-        break;
-      }
-    }
+    set({
+      tracks: newTracks,
+      clips: newClips,
+      past: [...past, tx],
+      future: newFuture,
+    });
   },
 
   canUndo: () => get().past.length > 0,
